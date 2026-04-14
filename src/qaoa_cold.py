@@ -11,7 +11,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from src.qubo import qubo_to_ising
+from qubo import qubo_to_ising
+#from src.qubo import qubo_to_ising
 
 try:
     import cudaq

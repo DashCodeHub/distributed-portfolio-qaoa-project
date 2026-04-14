@@ -10,8 +10,13 @@ import seaborn as sns
 from scipy.cluster.hierarchy import linkage, fcluster, dendrogram
 from sklearn.cluster import SpectralClustering
 
-from src.qubo import build_qubo, qubo_to_ising, qubo_to_cudaq_hamiltonian
-from src.qaoa_cold import extract_ising_terms, CUDAQ_AVAILABLE
+
+from qubo import build_qubo, qubo_to_ising, qubo_to_cudaq_hamiltonian
+from qaoa_cold import extract_ising_terms, CUDAQ_AVAILABLE
+
+
+#from src.qubo import build_qubo, qubo_to_ising, qubo_to_cudaq_hamiltonian
+#from src.qaoa_cold import extract_ising_terms, CUDAQ_AVAILABLE
 
 
 def correlation_to_distance(rho: np.ndarray) -> np.ndarray:
@@ -42,6 +47,33 @@ def cluster_stocks(
         condensed = dist[np.triu_indices(n, k=1)]
         Z = linkage(condensed, method="ward")
         labels = fcluster(Z, t=n_clusters, criterion="maxclust") - 1  # 0-indexed
+        print(f"Distance: {dist}")
+        print(f"condensed: {condensed}")
+        print(f"Z-linkages: {Z}")
+
+        ticker_map = {
+            0: "AAPL", 1: "MSFT", 2: "GOOGL",
+            3: "JPM", 4: "GS", 5: "BAC",
+            6: "XOM", 7: "CVX", 8: "COP",
+            9: "JNJ", 10: "PFE", 11: "UNH",
+            12: "PG", 13: "KO", 14: "WMT"
+        }
+
+        clusters = {i: [ticker_map[i]] for i in range(n)}
+
+        for step, row in enumerate(Z):
+            c1, c2, dist, size = row
+            c1, c2, size = int(c1), int(c2), int(size)
+
+            new_id = n + step
+            clusters[new_id] = clusters[c1] + clusters[c2]
+
+            print(f"Step {step}:")
+            print(f"  merge {c1} {clusters[c1]} and {c2} {clusters[c2]}")
+            print(f"  -> cluster {new_id}: {clusters[new_id]}")
+            print(f"  distance = {dist:.4f}, size = {size}\n")
+        print(f"labels:  {labels}")
+
     elif method == "spectral":
         # Spectral clustering uses affinity; shift correlation to [0, 1]
         affinity = (rho + 1.0) / 2.0
@@ -150,6 +182,8 @@ def _allocate_sub_budgets(labels: np.ndarray, budget: int) -> dict[int, int]:
     allocated = sum(floored.values())
     deficit = budget - allocated
 
+    #print(sorted(remainders, key=remainders.get, reverse=True))
+
     # Distribute remaining budget to clusters with largest remainders
     for k in sorted(remainders, key=remainders.get, reverse=True):
         if deficit <= 0:
@@ -198,7 +232,9 @@ def build_subproblems(
         sub_budget = sub_budgets[k]
 
         sub_qubo = build_qubo(sub_mu, sub_sigma, q, sub_budget, penalty)
+        # print(f"Sub_Qubo: {sub_qubo}")
         J, h, offset = qubo_to_ising(sub_qubo)
+        print(f"J = {J}, h = {h}, offset= {offset}")
 
         # Extract Ising terms for QAOA kernels
         ising = extract_ising_terms(sub_qubo)
@@ -257,10 +293,15 @@ def compute_cross_cluster_loss(sigma: np.ndarray, labels: np.ndarray) -> float:
 
 if __name__ == "__main__":
     import os
-    from src.data_pipeline import (
+    # from src.data_pipeline import (
+    #     fetch_stock_data, compute_log_returns, compute_financial_metrics, TICKERS,
+    #     START_DATE, END_DATE,
+    # )
+    from data_pipeline import (
         fetch_stock_data, compute_log_returns, compute_financial_metrics, TICKERS,
         START_DATE, END_DATE,
     )
+    
 
     N_CLUSTERS = 4
     BUDGET = 6
@@ -282,24 +323,24 @@ if __name__ == "__main__":
         members = [TICKERS[i] for i in range(len(TICKERS)) if labels[i] == k]
         print(f"  Cluster {k}: {members}")
 
-    # --- Plots ---
-    fig_dir = os.path.join(os.path.dirname(__file__), "..", "results", "figures")
-    os.makedirs(fig_dir, exist_ok=True)
+    # # --- Plots ---
+    # fig_dir = os.path.join(os.path.dirname(__file__), "..", "results", "figures")
+    # os.makedirs(fig_dir, exist_ok=True)
 
-    plot_dendrogram(rho, TICKERS, os.path.join(fig_dir, "dendrogram.png"), N_CLUSTERS)
-    plot_clustered_heatmap(rho, labels, TICKERS, os.path.join(fig_dir, "clustered_heatmap.png"))
+    # plot_dendrogram(rho, TICKERS, os.path.join(fig_dir, "dendrogram.png"), N_CLUSTERS)
+    # plot_clustered_heatmap(rho, labels, TICKERS, os.path.join(fig_dir, "clustered_heatmap.png"))
 
     # --- Subproblems ---
     print(f"\nBuilding subproblems (budget={BUDGET}, q={Q_RISK}, penalty={PENALTY})...")
     subproblems = build_subproblems(mu, sigma, labels, BUDGET, Q_RISK, PENALTY, TICKERS)
 
-    print("\nSubproblem summary:")
-    for sp in subproblems:
-        print(f"  Cluster {sp['cluster_id']}: "
-              f"stocks={sp['tickers']}, "
-              f"budget={sp['budget']}, "
-              f"QUBO size={sp['qubo'].shape[0]}x{sp['qubo'].shape[0]}")
+    # print("\nSubproblem summary:")
+    # for sp in subproblems:
+    #     print(f"  Cluster {sp['cluster_id']}: "
+    #           f"stocks={sp['tickers']}, "
+    #           f"budget={sp['budget']}, "
+    #           f"QUBO size={sp['qubo'].shape[0]}x{sp['qubo'].shape[0]}")
 
-    # --- Cross-cluster loss ---
-    loss = compute_cross_cluster_loss(sigma, labels)
-    print(f"\nCross-cluster covariance loss: {loss:.4f} ({loss*100:.2f}%)")
+    # # --- Cross-cluster loss ---
+    # loss = compute_cross_cluster_loss(sigma, labels)
+    # print(f"\nCross-cluster covariance loss: {loss:.4f} ({loss*100:.2f}%)")

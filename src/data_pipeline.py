@@ -90,10 +90,12 @@ if __name__ == "__main__":
 
     print("Fetching stock data...")
     prices = fetch_stock_data(TICKERS, START_DATE, END_DATE)
+    # print(prices)
     print(f"Prices shape: {prices.shape}")
 
     print("Computing log returns...")
     returns = compute_log_returns(prices)
+    print(returns)
     print(f"Returns shape: {returns.shape}")
 
     print("Computing financial metrics...")

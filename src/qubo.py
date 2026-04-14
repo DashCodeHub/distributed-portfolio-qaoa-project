@@ -156,3 +156,4 @@ def brute_force_qubo(
             best_x = x.copy()
 
     return best_x, best_val
+
