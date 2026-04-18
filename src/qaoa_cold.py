@@ -12,7 +12,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from qubo import qubo_to_ising
-#from src.qubo import qubo_to_ising
+#from qubo import qubo_to_ising
 
 try:
     import cudaq
@@ -116,7 +116,7 @@ def _cudaq_run_qaoa(
     maxiter: int = 200,
 ) -> dict:
     """Run cold-start QAOA using cudaq.observe and cudaq.sample."""
-    from src.qubo import qubo_to_cudaq_hamiltonian
+    from qubo import qubo_to_cudaq_hamiltonian
 
     hamiltonian = qubo_to_cudaq_hamiltonian(Q)
     ising = extract_ising_terms(Q)
@@ -171,6 +171,88 @@ def _cudaq_run_qaoa(
         "convergence": convergence,
     }
 
+
+def _cudaq_run_qaoa_distributed(
+    Q: np.ndarray,
+    qubit_count: int,
+    layer_count: int,
+    seed: int = 42,
+    shots: int = 10000,
+    maxiter: int = 200,
+) -> dict:
+    """Run cold-start QAOA using cudaq.observe and cudaq.sample."""
+    from qubo import qubo_to_cudaq_hamiltonian
+
+    cudaq.set_target("nvidia", option="mqpu")
+    target = cudaq.get_target()
+    n_qpus = target.num_qpus()
+    print("QPUs available:", n_qpus)
+
+    hamiltonian = qubo_to_cudaq_hamiltonian(Q)
+    ising = extract_ising_terms(Q)
+
+    edges_src = ising["edges_src"].tolist()
+    edges_tgt = ising["edges_tgt"].tolist()
+    coeffs = ising["coeffs"].tolist()
+    sq_indices = ising["single_qubit_indices"].tolist()
+    sq_coeffs = ising["single_qubit_coeffs"].tolist()
+    def batched_objective(theta_batch):
+        def objective(thetas):
+            return cudaq.observe(
+                kernel_qaoa, hamiltonian,
+                qubit_count, layer_count, thetas,
+                edges_src, edges_tgt, coeffs,
+                sq_indices, sq_coeffs
+            ).expectation()
+
+        # Distribute across QPUs
+        return cudaq.map(objective, theta_batch)
+
+    cudaq.set_random_seed(seed)
+    np.random.seed(seed)
+    
+    n_params = 2 * layer_count
+    optimal_val = float("inf")
+    optimal_params = None
+    convergence = []
+    n_batches = max(1, maxiter // n_qpus)
+    
+    for _ in range(n_batches):
+        theta_batch = [
+            np.random.uniform(0, np.pi, size=n_params).tolist()
+            for _ in range(n_qpus)
+        ]
+
+        values = batched_objective(theta_batch)
+
+        for val, params in zip(values, theta_batch):
+            convergence.append(val)
+            if val < optimal_val:
+                optimal_val = val
+                optimal_params = params
+
+
+    counts = cudaq.sample(
+        kernel_qaoa,
+        qubit_count, layer_count,
+        optimal_params,
+        edges_src, edges_tgt, coeffs,
+        sq_indices, sq_coeffs,
+        shots_count=shots
+    )
+
+    counts_dict = _sample_result_to_dict(counts, qubit_count)
+    # cudaq returns MSB-first bitstrings; convert to LSB-first for consistency
+    counts_lsb = {bs[::-1]: c for bs, c in counts_dict.items()}
+    best_bitstring = max(counts_lsb, key=counts_lsb.get)
+
+    return {
+        "optimal_energy": optimal_val,
+        "optimal_params": list(optimal_params),
+        "best_bitstring": best_bitstring,
+        "counts": counts_lsb,
+        "convergence": convergence,
+    }
 
 # ---------------------------------------------------------------------------
 # Numpy statevector fallback
@@ -366,7 +448,7 @@ def evaluate_portfolio(
 
 if __name__ == "__main__":
     import os
-    from src.data_pipeline import (
+    from data_pipeline import (
         fetch_stock_data,
         compute_log_returns,
         compute_financial_metrics,
@@ -374,8 +456,8 @@ if __name__ == "__main__":
         START_DATE,
         END_DATE,
     )
-    from src.clustering import cluster_stocks, build_subproblems
-    from src.qubo import brute_force_qubo
+    from clustering import cluster_stocks, build_subproblems
+    from qubo import brute_force_qubo
 
     print(f"Backend: {'cudaq' if CUDAQ_AVAILABLE else 'numpy (fallback)'}")
 
