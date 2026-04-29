@@ -1,28 +1,20 @@
 """
-Standard cold-start QAOA for portfolio optimization.
-
-Primary implementation uses CUDA-Q (cudaq.kernel, cudaq.observe, cudaq.sample).
-Falls back to a numpy statevector simulator when cudaq is unavailable.
+Cold-start QAOA for portfolio optimization (CUDA-Q backend).
 """
 
 import numpy as np
-from scipy.optimize import minimize as scipy_minimize
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from src.qubo import qubo_to_ising
+import cudaq
+from cudaq import spin
 
-try:
-    import cudaq
-    from cudaq import spin
-    CUDAQ_AVAILABLE = True
-except ImportError:
-    CUDAQ_AVAILABLE = False
+from src.qubo import qubo_to_ising
 
 
 # ---------------------------------------------------------------------------
-# Ising term extraction (pure math — used by both backends)
+# Ising term extraction (pure math)
 # ---------------------------------------------------------------------------
 
 def extract_ising_terms(Q: np.ndarray) -> dict:
@@ -67,32 +59,25 @@ def extract_ising_terms(Q: np.ndarray) -> dict:
 # CUDA-Q QAOA kernel and driver
 # ---------------------------------------------------------------------------
 
-if CUDAQ_AVAILABLE:
-
-    @cudaq.kernel
-    def kernel_qaoa(qubit_count: int, layer_count: int,
-                    thetas: list[float],
-                    edges_src: list[int], edges_tgt: list[int],
-                    coeffs: list[float],
-                    sq_indices: list[int], sq_coeffs: list[float]):
-        qubits = cudaq.qvector(qubit_count)
-        # Initial state: uniform superposition
-        h(qubits)
-        # QAOA layers
-        for p in range(layer_count):
-            gamma = thetas[2 * p]
-            beta = thetas[2 * p + 1]
-            # Problem unitary: ZZ terms via CNOT-Rz-CNOT
-            for k in range(len(edges_src)):
-                x.ctrl(qubits[edges_src[k]], qubits[edges_tgt[k]])
-                rz(2.0 * gamma * coeffs[k], qubits[edges_tgt[k]])
-                x.ctrl(qubits[edges_src[k]], qubits[edges_tgt[k]])
-            # Problem unitary: single Z terms
-            for k in range(len(sq_indices)):
-                rz(2.0 * gamma * sq_coeffs[k], qubits[sq_indices[k]])
-            # Mixer: Rx on all qubits
-            for i in range(qubit_count):
-                rx(2.0 * beta, qubits[i])
+@cudaq.kernel
+def kernel_qaoa(qubit_count: int, layer_count: int,
+                thetas: list[float],
+                edges_src: list[int], edges_tgt: list[int],
+                coeffs: list[float],
+                sq_indices: list[int], sq_coeffs: list[float]):
+    qubits = cudaq.qvector(qubit_count)
+    h(qubits)
+    for p in range(layer_count):
+        gamma = thetas[2 * p]
+        beta = thetas[2 * p + 1]
+        for k in range(len(edges_src)):
+            x.ctrl(qubits[edges_src[k]], qubits[edges_tgt[k]])
+            rz(2.0 * gamma * coeffs[k], qubits[edges_tgt[k]])
+            x.ctrl(qubits[edges_src[k]], qubits[edges_tgt[k]])
+        for k in range(len(sq_indices)):
+            rz(2.0 * gamma * sq_coeffs[k], qubits[sq_indices[k]])
+        for i in range(qubit_count):
+            rx(2.0 * beta, qubits[i])
 
 
 def _sample_result_to_dict(counts, qubit_count: int) -> dict[str, int]:
@@ -158,7 +143,6 @@ def _cudaq_run_qaoa(
         shots_count=shots)
 
     counts_dict = _sample_result_to_dict(counts, qubit_count)
-    # cudaq returns MSB-first bitstrings; convert to LSB-first for consistency
     counts_lsb = {bs[::-1]: c for bs, c in counts_dict.items()}
     best_bitstring = max(counts_lsb, key=counts_lsb.get)
 
@@ -172,121 +156,7 @@ def _cudaq_run_qaoa(
 
 
 # ---------------------------------------------------------------------------
-# Numpy statevector fallback
-# ---------------------------------------------------------------------------
-
-def _precompute_energies(ising_terms: dict) -> np.ndarray:
-    """Compute Ising energy (without offset) for every computational basis state."""
-    n = ising_terms["n_qubits"]
-    N = 1 << n
-    energies = np.zeros(N)
-
-    for k in range(N):
-        z = np.array([1 - 2 * ((k >> i) & 1) for i in range(n)], dtype=float)
-        for s, t, c in zip(
-            ising_terms["edges_src"],
-            ising_terms["edges_tgt"],
-            ising_terms["coeffs"],
-        ):
-            energies[k] += c * z[s] * z[t]
-        for idx, c in zip(
-            ising_terms["single_qubit_indices"],
-            ising_terms["single_qubit_coeffs"],
-        ):
-            energies[k] += c * z[idx]
-
-    return energies
-
-
-def _qaoa_circuit(
-    n_qubits: int,
-    layer_count: int,
-    thetas: np.ndarray,
-    energies: np.ndarray,
-) -> np.ndarray:
-    """Simulate the QAOA circuit via numpy statevector evolution (fallback)."""
-    N = 1 << n_qubits
-    psi = np.ones(N, dtype=complex) / np.sqrt(N)
-
-    for layer in range(layer_count):
-        gamma = thetas[2 * layer]
-        beta = thetas[2 * layer + 1]
-
-        psi *= np.exp(-1j * gamma * energies)
-
-        cb = np.cos(beta)
-        sb = np.sin(beta)
-        for j in range(n_qubits):
-            mask = 1 << j
-            for k in range(N):
-                if (k & mask) == 0:
-                    k2 = k | mask
-                    a0, a1 = psi[k], psi[k2]
-                    psi[k] = cb * a0 - 1j * sb * a1
-                    psi[k2] = -1j * sb * a0 + cb * a1
-
-    return psi
-
-
-def _numpy_run_qaoa(
-    Q: np.ndarray,
-    qubit_count: int,
-    layer_count: int,
-    seed: int = 42,
-    shots: int = 10000,
-    maxiter: int = 200,
-) -> dict:
-    """Run cold-start QAOA using numpy statevector simulation (fallback)."""
-    rng = np.random.default_rng(seed)
-    ising = extract_ising_terms(Q)
-    energies = _precompute_energies(ising)
-    offset = ising["offset"]
-
-    n_params = 2 * layer_count
-    init_params = rng.uniform(0, np.pi, size=n_params)
-
-    convergence = []
-
-    def objective(thetas):
-        psi = _qaoa_circuit(qubit_count, layer_count, thetas, energies)
-        probs = np.abs(psi) ** 2
-        exp_val = float(np.dot(probs, energies)) + offset
-        convergence.append(exp_val)
-        return exp_val
-
-    result = scipy_minimize(
-        objective,
-        init_params,
-        method="COBYLA",
-        options={"maxiter": maxiter, "rhobeg": 0.5},
-    )
-
-    optimal_params = result.x
-    optimal_energy = result.fun
-
-    psi = _qaoa_circuit(qubit_count, layer_count, optimal_params, energies)
-    probs = np.abs(psi) ** 2
-    N = 1 << qubit_count
-    samples = rng.choice(N, size=shots, p=probs)
-
-    counts: dict[str, int] = {}
-    for s in samples:
-        bs = format(s, f"0{qubit_count}b")[::-1]
-        counts[bs] = counts.get(bs, 0) + 1
-
-    best_bitstring = max(counts, key=counts.get)
-
-    return {
-        "optimal_energy": optimal_energy,
-        "optimal_params": optimal_params,
-        "best_bitstring": best_bitstring,
-        "counts": counts,
-        "convergence": convergence,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Public API — dispatches to cudaq or numpy fallback
+# Public API
 # ---------------------------------------------------------------------------
 
 def run_qaoa(
@@ -299,9 +169,7 @@ def run_qaoa(
     maxiter: int = 200,
 ) -> dict:
     """
-    Run cold-start QAOA on a QUBO matrix.
-
-    Uses cudaq kernels when available, numpy statevector fallback otherwise.
+    Run cold-start QAOA on a QUBO matrix using CUDA-Q.
 
     Returns
     -------
@@ -312,14 +180,11 @@ def run_qaoa(
         counts          – {bitstring: count} from shot sampling
         convergence     – list of expectation values at each optimizer evaluation
     """
-    if CUDAQ_AVAILABLE:
-        return _cudaq_run_qaoa(Q, qubit_count, layer_count, seed, shots, maxiter)
-    else:
-        return _numpy_run_qaoa(Q, qubit_count, layer_count, seed, shots, maxiter)
+    return _cudaq_run_qaoa(Q, qubit_count, layer_count, seed, shots, maxiter)
 
 
 # ---------------------------------------------------------------------------
-# Portfolio evaluation (pure math — no quantum)
+# Portfolio evaluation (pure math)
 # ---------------------------------------------------------------------------
 
 def evaluate_portfolio(
@@ -376,9 +241,6 @@ if __name__ == "__main__":
     from src.clustering import cluster_stocks, build_subproblems
     from src.qubo import brute_force_qubo
 
-    print(f"Backend: {'cudaq' if CUDAQ_AVAILABLE else 'numpy (fallback)'}")
-
-    # ---- Data & clustering (reproduce Phase 3) ----
     print("Fetching stock data...")
     prices = fetch_stock_data(TICKERS, START_DATE, END_DATE)
     returns = compute_log_returns(prices)
@@ -394,7 +256,6 @@ if __name__ == "__main__":
         mu, sigma, labels, BUDGET, Q_RISK, PENALTY, TICKERS
     )
 
-    # Pick smallest cluster
     sp = min(subproblems, key=lambda s: len(s["stock_indices"]))
     Q_sub = sp["qubo"]
     sub_mu = sp["mu"]
@@ -404,7 +265,6 @@ if __name__ == "__main__":
     print(f"\nValidation cluster {sp['cluster_id']}: {sp['tickers']}")
     print(f"  Qubits: {n}, Budget: {sp['budget']}")
 
-    # ---- Brute force reference ----
     bf_x, bf_val = brute_force_qubo(Q_sub, budget=sp["budget"])
     bf_bs = "".join(str(int(b)) for b in bf_x)
     bf_port = evaluate_portfolio(bf_bs, sub_mu, sub_sigma, Q_RISK)
@@ -417,9 +277,8 @@ if __name__ == "__main__":
         f"Sharpe = {bf_port['sharpe_ratio']:.4f}"
     )
 
-    # ---- QAOA at p = 1, 2, 3 ----
     print("\n" + "=" * 70)
-    print(f"QAOA Results  (cold-start, {'cudaq' if CUDAQ_AVAILABLE else 'numpy fallback'})")
+    print("QAOA Results (cold-start, CUDA-Q)")
     print("=" * 70)
 
     results = {}
@@ -454,7 +313,6 @@ if __name__ == "__main__":
         print(f"  Budget check       : {port['n_selected']}/{sp['budget']} "
               f"{'OK' if port['n_selected'] == sp['budget'] else 'VIOLATED'}")
 
-    # ---- Convergence plot ----
     fig_dir = os.path.join(os.path.dirname(__file__), "..", "results", "figures")
     os.makedirs(fig_dir, exist_ok=True)
 

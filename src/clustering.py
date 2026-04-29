@@ -11,7 +11,7 @@ from scipy.cluster.hierarchy import linkage, fcluster, dendrogram
 from sklearn.cluster import SpectralClustering
 
 from src.qubo import build_qubo, qubo_to_ising, qubo_to_cudaq_hamiltonian
-from src.qaoa_cold import extract_ising_terms, CUDAQ_AVAILABLE
+from src.qaoa_cold import extract_ising_terms
 
 
 def correlation_to_distance(rho: np.ndarray) -> np.ndarray:
@@ -225,9 +225,7 @@ def build_subproblems(
             "single_qubit_coeffs": ising["single_qubit_coeffs"].tolist(),
         }
 
-        # Build cudaq SpinOperator Hamiltonian if available
-        if CUDAQ_AVAILABLE:
-            sp["cudaq_hamiltonian"] = qubo_to_cudaq_hamiltonian(sub_qubo)
+        sp["cudaq_hamiltonian"] = qubo_to_cudaq_hamiltonian(sub_qubo)
 
         subproblems.append(sp)
 
