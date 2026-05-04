@@ -6,3 +6,4 @@ dist/
 build/
 .env
 venv/
+journal.md
