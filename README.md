@@ -209,3 +209,4 @@ Detailed citations are in Section 14 of the notebook. Key sources:
 - Egger et al., *Quantum* 5, 479 (2021) — warm-start QAOA, modified mixer.
 - Goemans & Williamson, *J. ACM* (1995) — SDP relaxation + hyperplane rounding.
 - NVIDIA CUDA-Q documentation — MQPU backend, `sample_async`.
+
